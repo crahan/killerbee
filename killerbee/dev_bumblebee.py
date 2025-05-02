@@ -149,7 +149,7 @@ class Bumblebee(object):
             else:
                 return None
 
-    def send_message(self, command, data):
+    def send_message(self, command, data: bytes):
         """
         Send a message to our dongle.
         """
@@ -170,7 +170,7 @@ class Bumblebee(object):
         # Return total number of bytes sent
         return sent
 
-    def send_packet(self, packet):
+    def send_packet(self, packet: bytes):
         """
         Send a 802.11.4 packet, FCS will be automatically added.
         FCS must not be provided, only packet data. Also, no need to add two
@@ -348,7 +348,7 @@ class Bumblebee(object):
 
 
     # KillerBee expects the driver to implement this function
-    def inject(self, packet, channel=None, count=1, delay=0, page=0):
+    def inject(self, packet: bytes, channel=None, count=1, delay=0, page=0):
         """
         Injects the specified packet contents.
         @type packet: String
