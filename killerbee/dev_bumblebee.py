@@ -154,9 +154,7 @@ class Bumblebee(object):
         Send a message to our dongle.
         """
         if isinstance(data, str):
-            # Log or warn if needed
-            print("WARNING: `data` was str; converting to bytes")
-            data = data.encode('latin1')  # Preserves byte values 0x00–0xFF
+            data = data.encode('latin1')  # Workaround for Python 2.x legacy strings
 
         length = len(data) + 3
         buf = struct.pack('<BB', length, command) + data
