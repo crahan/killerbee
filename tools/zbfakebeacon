@@ -32,7 +32,7 @@ def create_beacon(panid, coordinator, epanid):
 
 def response_handler(packet, channel):
     if len(packet) > 7:
-        if packet[7] == '\x07': # is it a beacon request?
+        if packet[7] == 0x07: # is it a beacon request?
             sp = create_beacon(spanid, args.coordinator, args.epanid) # respond to the beacon request.
             kb.sniffer_off()
             kb.inject(sp)
