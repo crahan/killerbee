@@ -16,6 +16,7 @@ import time # type: ignore
 from array import array # type: ignore
 from datetime import datetime # type: ignore
 from .kbutils import KBCapabilities, makeFCS, bytearray_to_bytes # type: ignore
+from binascii import hexlify
 
 import usb.core # type: ignore
 import usb.util # type: ignore
@@ -63,16 +64,16 @@ class Bumblebee(object):
     CMD_SNIFF_OFF = 0x08
     CMD_SNIFF_OFF_ACK = 0x09
     CMD_GOT_PKT = 0x0A
+    CMD_ERR = 0xFF
 
 
     def __init__(self, dev, bus):
         """
         Initialize device and capabilities.
         """
-
         self.dev = dev
         self.rx_buffer = bytes()
-        self.usb_rx_buffer = array('B', b'\x00'*256)
+        self.usb_rx_buffer = array('B', b'\x00'*64)
         self._channel = None
         self.__stream_open = False
         self.timeout = 2.0
@@ -81,8 +82,11 @@ class Bumblebee(object):
 
         # Set configuration
         self.dev.set_configuration()
-
         self.name = usb.util.get_string(self.dev, self.dev.iProduct)
+
+        # Initialize dongle (reset usb device and reset radio)
+        self.dev.reset()
+        self._do_init()
 
     def process_packet(self):
         """
@@ -97,7 +101,7 @@ class Bumblebee(object):
             while (len(self.rx_buffer) >= pkt_len) and (pkt_len > 0):
                 # Extract payload
                 payload = self.rx_buffer[1:pkt_len-1]
-                
+
                 # Extract CRC
                 crc = self.rx_buffer[pkt_len-1]
 
@@ -107,7 +111,7 @@ class Bumblebee(object):
                     self.rx_buffer = self.rx_buffer[pkt_len:]
 
                     # Yield packet
-                    yield CommProtocolPacket(payload[0], payload[1:]) 
+                    yield CommProtocolPacket(payload[0], payload[1:])
                 else:
                     # Chomp packet
                     self.rx_buffer = self.rx_buffer[pkt_len:]
@@ -117,6 +121,7 @@ class Bumblebee(object):
                   pkt_len = self.rx_buffer[0]
                 else:
                   pkt_len = 0
+
 
     def crc(self, x):
         """
@@ -132,11 +137,12 @@ class Bumblebee(object):
         Read incoming data and fill RX buffer.
         """
         try:
-          nbytes = self.dev.read(Bumblebee.EP_IN, self.usb_rx_buffer, 100)
+          nbytes = self.dev.read(Bumblebee.EP_IN, self.usb_rx_buffer, 10)
           if nbytes > 0:
-            self.rx_buffer += self.usb_rx_buffer.tobytes()[:nbytes]
+            data_length = self.usb_rx_buffer[0]
+            self.rx_buffer += self.usb_rx_buffer.tobytes()[1:1+data_length]
         except usb.core.USBError as e:
-            if e.errno is not 110 and e.errno is not 60: #Operation timed out
+            if e.errno != 110: #Operation timed out
                 print("Error args: {}".format(e.args))
                 raise e
                 #TODO error handling enhancements for USB 1.0
@@ -175,6 +181,17 @@ class Bumblebee(object):
           packet
         )
         return self.wait_for_ack(Bumblebee.CMD_SEND_PKT_ACK)
+
+
+    def _do_init(self):
+        """
+        Initialize our dongle
+        """
+        self.send_message(
+          Bumblebee.CMD_INIT,
+          bytes([])
+        )
+        return self.wait_for_ack(Bumblebee.CMD_INIT_ACK)
 
 
     def _do_set_channel(self):
@@ -224,8 +241,12 @@ class Bumblebee(object):
               if pkt.get_command() == command_ack:
                 return True
 
+              if pkt.get_command() == Bumblebee.CMD_ERR:
+                  print('[error] %s' % hexlify(pkt.get_data()))
+
             # Timeout expired ?
             if (time.time() - entry_time) >= self.timeout:
+              print('timeout! (%d)' % command_ack)
               return False
 
             # Wait a bit
@@ -283,7 +304,7 @@ class Bumblebee(object):
         if self.dev is not None:
             if channel is not None:
                 self.set_channel(channel, page)
-            
+
             # Enable sniffer
             self._do_sniffer_on()
             self.__stream_open = True
@@ -371,30 +392,29 @@ class Bumblebee(object):
 
         # Loop on all received packets
         for packet in self.process_packet():
-            if packet is not None:
-                payload = packet.get_data()
-            else:
-                return None
+            payload = packet.get_data()
 
             # CC2531 only allow (for the moment) to capture packets with valid CRC
             validcrc = True
 
-            # Extract RSSI and LQI from payload buffer.
-            rssi = struct.unpack('<b', bytes([payload[0]]))[0]
-            correlation = struct.unpack('<b', bytes([payload[1]]))[0]
+            # Ensure packet is a CMD_GOT_PKT
+            if packet.get_command() == Bumblebee.CMD_GOT_PKT:
+                # Extract RSSI and LQI from payload buffer.
+                rssi = struct.unpack('<b', bytes([payload[0]]))[0]
+                correlation = struct.unpack('<b', bytes([payload[1]]))[0]
 
-            ret = {1:validcrc, 2:rssi,
-                        'validcrc':validcrc, 'rssi':rssi, 'lqi':correlation,
-                        'dbm':rssi,'datetime':datetime.utcnow()}
+                ret = {1:validcrc, 2:rssi,
+                          'validcrc':validcrc, 'rssi':rssi, 'lqi':correlation,
+                          'dbm':rssi,'datetime':datetime.utcnow()}
 
-            # Convert the framedata to a string for the return value, and replace the TI FCS with a real FCS
-            # if the radio told us that the FCS had passed validation.
-            if validcrc:
-                ret[0] = bytearray_to_bytes(payload[2:]) + makeFCS(payload[2:])
-            else:
-                ret[0] = bytearray_to_bytes(payload)
-            ret['bytes'] = ret[0]
-            return ret
+                # Convert the framedata to a string for the return value, and replace the TI FCS with a real FCS
+                # if the radio told us that the FCS had passed validation.
+                if validcrc:
+                    ret[0] = bytearray_to_bytes(payload[2:]) + makeFCS(payload[2:])
+                else:
+                    ret[0] = bytearray_to_bytes(payload)
+                ret['bytes'] = ret[0]
+                return ret
 
     def jammer_on(self, channel=None, page=0):
         """
